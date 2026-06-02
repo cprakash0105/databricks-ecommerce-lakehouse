@@ -5,16 +5,11 @@ terraform {
       source  = "hashicorp/google"
       version = "~> 5.0"
     }
-    databricks = {
-      source  = "databricks/databricks"
-      version = "~> 1.40"
-    }
   }
   # backend "gcs" {
-  #   bucket = "YOUR_PROJECT_ID-tfstate"
+  #   bucket = "cp-ecomm-demo-tfstate"
   #   prefix = "terraform/state"
   # }
-  # Uncomment above after creating the bucket. Use local state initially.
 }
 
 provider "google" {
@@ -22,13 +17,7 @@ provider "google" {
   region  = var.region
 }
 
-# Databricks provider — only needed when deploy_databricks = true
-# Set DATABRICKS_HOST and DATABRICKS_TOKEN env vars
-provider "databricks" {
-  host = var.databricks_host
-}
-
-# ─── GCP Infrastructure (Phase A) ────────────────────────────────────────────
+# ─── GCP Infrastructure ──────────────────────────────────────────────────────
 
 module "networking" {
   source     = "../../modules/networking"
@@ -57,26 +46,14 @@ module "pubsub" {
 }
 
 module "cloudsql" {
-  source     = "../../modules/cloudsql"
-  project_id = var.project_id
-  region     = var.region
-  env        = var.env
-  network_id = module.networking.vpc_id
-}
+  source      = "../../modules/cloudsql"
+  project_id  = var.project_id
+  region      = var.region
+  env         = var.env
+  network_id  = module.networking.vpc_id
+  db_password = var.db_password
 
-# ─── Databricks Catalog Setup (Phase B) ──────────────────────────────────────
-# Set deploy_databricks = true after workspace is ready and env vars are set
-
-module "databricks" {
-  count               = var.deploy_databricks ? 1 : 0
-  source              = "../../modules/databricks"
-  project_id          = var.project_id
-  region              = var.region
-  env                 = var.env
-  vpc_id              = module.networking.vpc_id
-  subnet_id           = module.networking.databricks_subnet_id
-  storage_bucket      = module.storage.lakehouse_bucket_name
-  service_account_email = module.iam.databricks_sa_email
+  depends_on = [module.networking]
 }
 
 # ─── Outputs ──────────────────────────────────────────────────────────────────
