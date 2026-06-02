@@ -1,0 +1,52 @@
+{
+  "name": "ecommerce_lakehouse_workflow",
+  "tasks": [
+    {
+      "task_key": "dlt_pipeline",
+      "pipeline_task": {
+        "pipeline_id": "${dlt_pipeline_id}",
+        "full_refresh": false
+      }
+    },
+    {
+      "task_key": "business_dq_checks",
+      "depends_on": [{"task_key": "dlt_pipeline"}],
+      "notebook_task": {
+        "notebook_path": "/Repos/ecommerce-lakehouse/databricks/notebooks/dq/business_dq_rules",
+        "source": "GIT"
+      },
+      "new_cluster": {
+        "spark_version": "14.3.x-scala2.12",
+        "node_type_id": "n2-standard-4",
+        "num_workers": 0,
+        "spark_conf": {
+          "spark.master": "local[*]"
+        }
+      }
+    },
+    {
+      "task_key": "observability_metrics",
+      "depends_on": [{"task_key": "dlt_pipeline"}],
+      "notebook_task": {
+        "notebook_path": "/Repos/ecommerce-lakehouse/databricks/notebooks/governance/observability",
+        "source": "GIT"
+      },
+      "new_cluster": {
+        "spark_version": "14.3.x-scala2.12",
+        "node_type_id": "n2-standard-4",
+        "num_workers": 0,
+        "spark_conf": {
+          "spark.master": "local[*]"
+        }
+      }
+    }
+  ],
+  "schedule": {
+    "quartz_cron_expression": "0 0 * * * ?",
+    "timezone_id": "Europe/London"
+  },
+  "tags": {
+    "domain": "ecommerce",
+    "env": "dev"
+  }
+}
