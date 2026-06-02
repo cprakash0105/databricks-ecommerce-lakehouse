@@ -18,7 +18,10 @@ resource "google_storage_bucket" "landing_zone" {
 
   lifecycle_rule {
     condition { age = 30 }
-    action { type = "SetStorageClass", storage_class = "NEARLINE" }
+    action {
+      type          = "SetStorageClass"
+      storage_class = "NEARLINE"
+    }
   }
 
   labels = {
