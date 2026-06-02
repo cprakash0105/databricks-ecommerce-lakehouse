@@ -31,33 +31,33 @@ provider "databricks" {
 # ─── GCP Infrastructure (Phase A) ────────────────────────────────────────────
 
 module "networking" {
-  source     = "../modules/networking"
+  source     = "../../modules/networking"
   project_id = var.project_id
   region     = var.region
   env        = var.env
 }
 
 module "storage" {
-  source     = "../modules/storage"
+  source     = "../../modules/storage"
   project_id = var.project_id
   region     = var.region
   env        = var.env
 }
 
 module "iam" {
-  source     = "../modules/iam"
+  source     = "../../modules/iam"
   project_id = var.project_id
   env        = var.env
 }
 
 module "pubsub" {
-  source     = "../modules/pubsub"
+  source     = "../../modules/pubsub"
   project_id = var.project_id
   env        = var.env
 }
 
 module "cloudsql" {
-  source     = "../modules/cloudsql"
+  source     = "../../modules/cloudsql"
   project_id = var.project_id
   region     = var.region
   env        = var.env
@@ -69,7 +69,7 @@ module "cloudsql" {
 
 module "databricks" {
   count               = var.deploy_databricks ? 1 : 0
-  source              = "../modules/databricks"
+  source              = "../../modules/databricks"
   project_id          = var.project_id
   region              = var.region
   env                 = var.env
