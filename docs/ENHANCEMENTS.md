@@ -404,6 +404,190 @@ Rejects are stored with full payload for manual review and reprocessing.
 
 ---
 
+---
+
+## Multi-Cloud Integration
+
+| # | Scenario | Priority | Effort | Status | Notes |
+|---|---|---|---|---|---|
+| 23 | **Azure Blob as Data Source (M&A scenario)** | 🔴 | 20 min | 🔲 TODO | "Acquired company" runs on Azure. Ingest their product/inventory data from Azure Blob into the GCP lakehouse via Auto Loader + ABFS connector. |
+| 24 | **AWS S3 as DR / Consumption Layer** | 🔴 | 30 min | 🔲 TODO | Replicate Gold tables to S3. AWS Athena queries Delta/Parquet files directly. Shows cross-cloud DR and vendor-agnostic consumption. |
+| 25 | **Azure Event Hubs as Streaming Source** | 🟡 | 25 min | 🔲 TODO | Azure Event Hubs exposes Kafka-compatible API. Existing streaming pipeline reads from both Confluent Kafka AND Azure Event Hubs — same DLT code. |
+| 26 | **Multi-Cloud Iceberg (UniForm + Athena + Synapse)** | 🟡 | 30 min | 🔲 TODO | Enable UniForm on Gold tables. AWS Athena reads via Iceberg. Azure Synapse reads via Iceberg. Three clouds, one table, zero duplication. Ties into V2 plan. |
+| 27 | **Cross-Cloud Metadata Sync (Purview)** | 🟢 | 30 min | 🔲 TODO | Push Unity Catalog metadata to Microsoft Purview via REST API. Enterprise-wide single pane of glass across all clouds. |
+| 28 | **Delta Sharing Cross-Cloud** | 🟡 | 15 min | 🔲 TODO | Share Gold tables to an AWS-based recipient via Delta Sharing. Recipient reads from S3 without Databricks. Shows data mesh across cloud boundaries. |
+
+---
+
+### 23. Azure Blob as Data Source (M&A Scenario)
+
+**What:** Simulate acquired company data on Azure. Databricks Auto Loader ingests from Azure Blob alongside GCS.
+
+**Demo narrative:** *"The company acquired a business running on Azure. We ingest their product catalog from Azure Blob into our GCP lakehouse — same medallion pipeline, same governance, no migration required."*
+
+**Implementation:**
+- Create Azure free account ($200 credit)
+- Create Storage Account + container: `acquired-company-data`
+- Upload product catalog JSON files
+- Create Databricks external location pointing to `abfss://container@account.dfs.core.windows.net/`
+- Add Azure source to batch DLT pipeline:
+```python
+@dlt.table(name="bronze_products_azure")
+def bronze_products_azure():
+    return (
+        spark.readStream
+        .format("cloudFiles")
+        .option("cloudFiles.format", "json")
+        .option("cloudFiles.inferColumnTypes", "true")
+        .load("abfss://acquired-company-data@storageaccount.dfs.core.windows.net/products/")
+        .withColumn("ingestion_ts", current_timestamp())
+        .withColumn("source_cloud", lit("azure"))
+    )
+```
+
+---
+
+### 24. AWS S3 as DR / Consumption Layer
+
+**What:** Replicate Gold tables to S3. Query from AWS Athena without Databricks.
+
+**Demo narrative:** *"Gold tables are replicated to AWS S3 for disaster recovery and for teams that run on AWS. They query via Athena — no Databricks license needed. Same data, multiple clouds."*
+
+**Implementation:**
+- Create AWS free tier account
+- Create S3 bucket: `ecommerce-lakehouse-dr`
+- Use GCP Cloud Storage Transfer to replicate `cp-ecomm-demo-lakehouse-dev/gold/` → S3
+- OR: Export Gold tables as Parquet via notebook → upload to S3
+- Create AWS Glue Crawler → catalogs the Parquet/Delta files
+- Query in Athena:
+```sql
+SELECT segment, COUNT(*), AVG(lifetime_value)
+FROM ecommerce_gold.customer_360
+GROUP BY segment;
+```
+
+---
+
+### 25. Azure Event Hubs as Streaming Source
+
+**What:** Azure Event Hubs provides Kafka-compatible API. Same streaming DLT pipeline reads from both sources.
+
+**Demo narrative:** *"The acquired Azure-based system emits events to Event Hubs. Because Event Hubs exposes a Kafka API, our existing streaming pipeline ingests from it with zero code changes — just a different bootstrap server."*
+
+**Implementation:**
+- Create Event Hubs namespace (free tier: 1 TU)
+- Create topic: `azure.orders`
+- Connection string acts as Kafka bootstrap + SASL credentials
+- Add to streaming DLT:
+```python
+azure_kafka_config = {
+    "kafka.bootstrap.servers": "your-namespace.servicebus.windows.net:9093",
+    "kafka.security.protocol": "SASL_SSL",
+    "kafka.sasl.mechanism": "PLAIN",
+    "kafka.sasl.jaas.config": "...EventHubs connection string...",
+}
+
+@dlt.table(name="bronze_orders_azure")
+def bronze_orders_azure():
+    return (
+        spark.readStream.format("kafka")
+        .options(**azure_kafka_config)
+        .option("subscribe", "azure.orders")
+        .option("startingOffsets", "earliest")
+        .load()
+    )
+```
+
+---
+
+### 26. Multi-Cloud Iceberg (UniForm + Athena + Synapse)
+
+**What:** Enable UniForm on Gold tables so they emit both Delta and Iceberg metadata. AWS Athena and Azure Synapse read natively.
+
+**Demo narrative:** *"We write Delta natively in Databricks, but UniForm auto-generates Iceberg metadata. AWS reads via Athena Iceberg connector, Azure reads via Synapse Iceberg connector. One write, three clouds, zero duplication."*
+
+**Implementation:**
+```sql
+ALTER TABLE ecommerce_dev.default.gold_customer_360
+SET TBLPROPERTIES ('delta.universalFormat.enabledFormats' = 'iceberg');
+
+ALTER TABLE ecommerce_dev.default.gold_daily_revenue
+SET TBLPROPERTIES ('delta.universalFormat.enabledFormats' = 'iceberg');
+```
+Then:
+- AWS Athena: register Iceberg table pointing to GCS (or replicated S3)
+- Azure Synapse: OPENROWSET against Iceberg metadata
+- Trino (V2): connects via Iceberg REST Catalog
+
+---
+
+### 27. Cross-Cloud Metadata Sync (Purview)
+
+**What:** Sync Unity Catalog metadata to Microsoft Purview for enterprise-wide discovery.
+
+**Demo narrative:** *"Unity Catalog governs the Databricks platform. Metadata is synced to Microsoft Purview so the enterprise has a single catalog across all data assets — GCP, Azure, AWS — regardless of where the data lives."*
+
+**Implementation:**
+- Use Databricks Unity Catalog REST API to export table/column metadata
+- Transform to Purview-compatible format (Apache Atlas entities)
+- Push via Purview REST API (`/api/atlas/v2/entity`)
+- Script runs on schedule to keep catalogs in sync
+
+---
+
+### 28. Delta Sharing Cross-Cloud
+
+**What:** Share Gold tables to a recipient on AWS. They consume without Databricks.
+
+**Demo narrative:** *"Marketing team runs on AWS. They consume our Gold data product via Delta Sharing — open protocol, no Databricks required on their side. They use the delta-sharing Python library or Spark connector to read directly from our GCS storage via pre-signed URLs."*
+
+**Implementation:**
+```sql
+CREATE SHARE cross_cloud_share;
+ALTER SHARE cross_cloud_share ADD TABLE ecommerce_dev.default.gold_customer_360;
+ALTER SHARE cross_cloud_share ADD TABLE ecommerce_dev.default.gold_daily_revenue;
+CREATE RECIPIENT aws_marketing_team;
+-- Share the activation link with the AWS-side consumer
+```
+AWS consumer:
+```python
+import delta_sharing
+profile = "path/to/share_profile.json"
+df = delta_sharing.load_as_pandas(f"{profile}#cross_cloud_share.default.gold_customer_360")
+```
+
+---
+
+## Updated Architecture (Multi-Cloud)
+
+```
+┌──────────────┐  ┌──────────────┐  ┌──────────────────────────────────────┐
+│   AZURE      │  │   GCP        │  │   AWS                                │
+│              │  │ (PRIMARY)    │  │                                      │
+│ Blob Storage │  │ GCS Buckets  │  │ S3 (DR/Consumption)                  │
+│ (M&A data)   │  │ Cloud SQL    │  │ Athena (queries Gold)                │
+│              │  │ Pub/Sub      │  │                                      │
+│ Event Hubs   │  │ Kafka        │  │ Delta Sharing recipient              │
+│ (streaming)  │  │ (Confluent)  │  │                                      │
+│              │  │              │  │                                      │
+│ Purview      │  │ DATABRICKS   │  │                                      │
+│ (metadata    │  │ (lakehouse)  │  │                                      │
+│  catalog)    │  │              │  │                                      │
+└──────┬───────┘  └──────┬───────┘  └───────────────────┬──────────────────┘
+       │                 │                              │
+       └─────────────────┼──────────────────────────────┘
+                         │
+                         ▼
+              ┌──────────────────────┐
+              │   DATABRICKS (GCP)   │
+              │   Unity Catalog      │
+              │   Single governance  │
+              │   across all clouds  │
+              └──────────────────────┘
+```
+
+---
+
 ## Completed Phases (for reference)
 
 - [x] Phase 1: GCP Infrastructure (Terraform)
