@@ -197,6 +197,213 @@ CREATE CATALOG ecommerce_staging;
 
 ---
 
+---
+
+## Unhappy Path / Failure Scenarios
+
+| # | Scenario | Priority | Effort | Status | Notes |
+|---|---|---|---|---|---|
+| 11 | **Kafka Broker Unavailable** | 🔴 | 20 min | 🔲 TODO | Simulate Kafka outage. Show pipeline retries with backoff, doesn't crash. Checkpoints preserve progress. On recovery, resumes from last committed offset. |
+| 12 | **Late-Arriving Data** | 🔴 | 20 min | 🔲 TODO | Send events with timestamps 2 hours in the past. Show watermarking handles them correctly — either processed or dropped with audit trail. |
+| 13 | **Duplicate Events (At-Least-Once Delivery)** | 🔴 | 15 min | 🔲 TODO | Send same event_id twice from producer. Show `dropDuplicates` in Silver catches it. Reconciliation proves exact count. |
+| 14 | **Partial Batch Failure (Poison Pill)** | 🔴 | 25 min | 🔲 TODO | Mix valid + invalid JSON in same Kafka batch. Valid records proceed to Silver, invalid route to quarantine. Pipeline continues uninterrupted. |
+| 15 | **Source Schema Breaking Change** | 🟡 | 20 min | 🔲 TODO | Upstream renames `total_amount` → `order_total`. Pipeline fails gracefully, logs schema mismatch, alerts. No silent data loss. |
+| 16 | **DQ Expectation Failure (expect_or_fail)** | 🟡 | 15 min | 🔲 TODO | Inject orders with negative amounts. Show `expect_or_fail` halts that table's update, other tables continue. DQ alert fires. |
+| 17 | **Storage Credential Expiry / Permission Revoked** | 🟡 | 15 min | 🔲 TODO | Temporarily revoke GCS access from Databricks SA. Show pipeline fails with clear error. Restore → pipeline auto-recovers on next run. |
+| 18 | **Network Partition (GCS Unreachable)** | 🟡 | 15 min | 🔲 TODO | Simulate by pointing Auto Loader to non-existent bucket. Show error handling, retry logic, and graceful failure without corrupting existing tables. |
+| 19 | **Concurrent Pipeline Conflict** | 🟢 | 20 min | 🔲 TODO | Run batch and streaming pipelines simultaneously writing to overlapping tables. Show Delta's ACID transactions prevent corruption. |
+| 20 | **Checkpoint Corruption Recovery** | 🟢 | 20 min | 🔲 TODO | Delete/corrupt streaming checkpoint. Show how to recover: reset to earliest offset, reprocess with dedup ensuring no duplicates in Silver/Gold. |
+| 21 | **Backpressure / Volume Spike** | 🟢 | 20 min | 🔲 TODO | Crank producer to 100+ events/sec. Show DLT handles backpressure via micro-batch sizing. No data loss, just increased latency. |
+| 22 | **Reject Handling with Business Rules** | 🔴 | 25 min | 🔲 TODO | Orders from sanctioned countries, amounts exceeding fraud threshold, invalid product IDs → separate reject table with rejection reason code, timestamp, source record. Reprocessable. |
+
+---
+
+### 11. Kafka Broker Unavailable
+
+**What:** Simulate Kafka connectivity loss. Pipeline retries gracefully, resumes on recovery.
+
+**Demo narrative:** *"When Kafka goes down, the streaming pipeline doesn't crash — it retries with exponential backoff. When connectivity restores, it resumes from the exact last committed offset. Zero data loss."*
+
+**Implementation:**
+- Pause/revoke Kafka API key temporarily in Confluent console
+- Pipeline logs connection errors but keeps retrying
+- Re-enable key → pipeline resumes from checkpoint
+- Show event log: retry attempts + successful recovery
+
+---
+
+### 12. Late-Arriving Data
+
+**What:** Produce events with timestamps significantly in the past. Show watermark behavior.
+
+**Demo narrative:** *"In real-time systems, events arrive late — network delays, mobile app buffering. Our watermark is set to 30 minutes for clickstream. Events older than that are dropped with an audit trail. Events within the window are processed normally."*
+
+**Implementation:**
+- Modify Kafka producer to send events with `timestamp = now() - 2 hours`
+- Silver's `withWatermark("event_ts", "30 minutes")` drops them
+- Add a `late_arrivals` audit table that captures dropped-due-to-watermark counts
+- DQ rule: "late arrival rate should be < 5%"
+
+---
+
+### 13. Duplicate Events
+
+**What:** Intentionally produce same `event_id` / `txn_id` multiple times. Show dedup works.
+
+**Demo narrative:** *"Kafka guarantees at-least-once delivery. Our Silver layer uses `dropDuplicates` on business keys to ensure exactly-once semantics. Reconciliation proves bronze_count >= silver_count, and the difference equals detected duplicates."*
+
+**Implementation:**
+- Modify producer: send 10% of events twice with same `event_id`
+- Silver's `dropDuplicates(["event_id"])` catches them
+- Reconciliation: `bronze_count - silver_count = duplicate_count`
+- Log duplicates detected per run in governance table
+
+---
+
+### 14. Partial Batch Failure (Poison Pill)
+
+**What:** Mix valid JSON + malformed JSON + valid JSON in same topic. Only bad records quarantined.
+
+**Demo narrative:** *"A single bad record doesn't take down the pipeline. We use PERMISSIVE parsing — valid records flow through, malformed records route to quarantine with the raw payload and parse error. The stream never stops."*
+
+**Implementation:**
+- Modify producer to inject ~5% malformed JSON (missing brackets, wrong types)
+- In streaming DLT, use `from_json` with `columnNameOfCorruptRecord = "_corrupt_record"`
+- Split: `_corrupt_record IS NULL` → Silver, otherwise → quarantine table
+- Quarantine schema: `raw_payload, error_reason, kafka_timestamp, ingestion_ts`
+
+---
+
+### 15. Source Schema Breaking Change
+
+**What:** Upstream renames a column. Pipeline detects mismatch and fails gracefully.
+
+**Demo narrative:** *"When a producer makes a breaking schema change without updating the data contract, our pipeline fails fast with a clear error — not silently dropping data. The alert fires, and the team negotiates the contract change."*
+
+**Implementation:**
+- Produce events with `order_total` instead of `amount`
+- Silver's `from_json` with strict schema returns NULL for missing `amount`
+- `expect_or_fail("positive_amount", "amount > 0")` triggers failure
+- DLT event log shows exactly which expectation failed and why
+- Alert fires on pipeline failure
+
+---
+
+### 16. DQ Expectation Failure (expect_or_fail)
+
+**What:** Inject data that violates a critical DQ rule. Show partial pipeline success.
+
+**Demo narrative:** *"Critical DQ rules use expect_or_fail — if violated, that specific table's update halts. But other independent tables continue processing. You get targeted failure, not total pipeline collapse."*
+
+**Implementation:**
+- Produce transactions with `amount = -500`
+- `expect_or_fail("positive_amount", "amount > 0")` halts `silver_transactions`
+- `silver_clickstream` and downstream Gold tables continue processing
+- Event log clearly shows which expectation failed
+
+---
+
+### 17. Storage Credential Expiry
+
+**What:** Temporarily revoke GCS permissions. Show clear failure and recovery.
+
+**Demo narrative:** *"If the storage credential expires or permissions are revoked, the pipeline fails with a clear 403 error — not silent data corruption. Once permissions are restored, the next pipeline trigger auto-recovers."*
+
+**Implementation:**
+- In GCP IAM, temporarily remove `storage.admin` from Databricks SA
+- Pipeline run fails with permission denied
+- Restore permission → next run succeeds
+- Show: no partial writes, no corrupted tables (Delta's atomic commits)
+
+---
+
+### 18. Network Partition (GCS Unreachable)
+
+**What:** Point Auto Loader to a non-existent path. Show graceful failure.
+
+**Demo narrative:** *"Network issues don't corrupt the lakehouse. Delta's ACID transactions mean either a commit fully succeeds or it doesn't — no half-written data."*
+
+**Implementation:**
+- Temporarily change Auto Loader path to `gs://non-existent-bucket/`
+- Pipeline fails cleanly with IOException
+- Fix path → re-run → resumes from checkpoint
+- Verify: no phantom records in Bronze
+
+---
+
+### 19. Concurrent Pipeline Conflict
+
+**What:** Run batch + streaming pipelines targeting same tables simultaneously.
+
+**Demo narrative:** *"Delta Lake's ACID transactions handle concurrent writes. Two pipelines can write to the same table without corruption — conflicts are resolved via optimistic concurrency control."*
+
+**Implementation:**
+- Trigger both `ecommerce-lakehouse` and `ecommerce-streaming` at the same time
+- Both write to tables in `ecommerce_dev.default`
+- Verify no data corruption, no lost records
+- Check Delta history: `DESCRIBE HISTORY ecommerce_dev.default.gold_customer_360`
+
+---
+
+### 20. Checkpoint Corruption Recovery
+
+**What:** Simulate lost checkpoint. Show recovery procedure.
+
+**Demo narrative:** *"If a streaming checkpoint is corrupted, we reset to earliest offset and reprocess. Our dedup logic in Silver ensures no duplicates appear even after full reprocessing."*
+
+**Implementation:**
+- Delete checkpoint directory in GCS
+- Restart pipeline with `startingOffsets = "earliest"`
+- Bronze gets re-ingested (duplicates)
+- Silver's `dropDuplicates` prevents downstream duplicates
+- Reconciliation confirms Gold counts unchanged
+
+---
+
+### 21. Backpressure / Volume Spike
+
+**What:** Spike producer rate from 5/sec to 100+/sec. Show DLT handles gracefully.
+
+**Demo narrative:** *"During Black Friday-style spikes, the pipeline doesn't drop data — it increases micro-batch sizes and processes more per cycle. Latency grows slightly but no data loss."*
+
+**Implementation:**
+- Run: `python kafka_producer.py --duration 60 --rate 100`
+- Pipeline processes larger batches
+- Check DLT event logs: batch sizes increase, processing time increases
+- Verify: all records eventually land in Gold
+
+---
+
+### 22. Reject Handling with Business Rules
+
+**What:** Implement a business-rule reject table separate from DQ (DQ = technical, rejects = business logic).
+
+**Demo narrative:** *"Technical DQ catches malformed data. Business rejects catch valid-but-unacceptable data — fraud-risk transactions, sanctioned countries, exceeded thresholds. Both are auditable and reprocessable."*
+
+**Implementation:**
+```sql
+CREATE TABLE ecommerce_dev.governance.business_rejects (
+  reject_timestamp TIMESTAMP,
+  source_table STRING,
+  record_key STRING,
+  reject_reason_code STRING,
+  reject_reason_desc STRING,
+  raw_payload STRING,
+  reprocessed BOOLEAN DEFAULT FALSE,
+  reprocessed_at TIMESTAMP
+);
+```
+
+Business rules:
+- `amount > 50000` → reject (fraud threshold)
+- `country IN ('XX','YY')` → reject (sanctioned)
+- `product_id NOT IN inventory` → reject (invalid reference)
+- `customer_id IS NULL AND amount > 1000` → reject (anonymous high-value)
+
+Rejects are stored with full payload for manual review and reprocessing.
+
+---
+
 ## Completed Phases (for reference)
 
 - [x] Phase 1: GCP Infrastructure (Terraform)
