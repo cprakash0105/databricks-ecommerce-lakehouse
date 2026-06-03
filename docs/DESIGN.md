@@ -135,16 +135,17 @@ Enterprise data platform on **GCP + Databricks** demonstrating end-to-end lakeho
 | 4.3 | Run pipeline | All 6 tables created, data flowing Bronze→Silver→Gold |
 | 4.4 | Verify Gold tables via SQL queries | `gold_customer_360`, `gold_daily_revenue` populated |
 
-### Phase 5: Governance 🔲 NEXT
+### Phase 5: Governance ✅ COMPLETE
 
 | Step | Action | Outcome |
 |------|--------|---------|
-| 5.1 | Apply active metadata tags (domain, owner, SLA, PII classification) | Tables discoverable and classified |
-| 5.2 | Create dynamic PII masking views | Analysts see masked data, PII readers see raw |
-| 5.3 | Verify automatic lineage in Unity Catalog | Table + column lineage visible |
-| 5.4 | Deploy business DQ rules job | Results written to `governance.dq_results` |
-| 5.5 | Data locality validation | Assert all data in correct region |
-| 5.6 | Audit log queries | Track who accessed what |
+| 5.1 | Apply active metadata tags (domain, owner, SLA, PII classification) | Tags visible on all tables/columns in Catalog UI |
+| 5.2 | Classify PII columns (email, phone, name) | Column tags with classification=pii |
+| 5.3 | Create dynamic PII masking views | `v_customer_360_masked`, `v_silver_customers_masked` |
+| 5.4 | Verify automatic lineage in Unity Catalog | Visual lineage graph with pipeline hops |
+| 5.5 | Deploy business DQ rules (5 rules) | Results in `governance.dq_results` (all passing) |
+| 5.6 | Freshness monitoring | Results in `governance.freshness_metrics` |
+| 5.7 | Create governance tables (dq_results, freshness_metrics, table_growth) | Observability foundation ready |
 
 ### Phase 6: Data Virtualization 🔲 PLANNED
 
